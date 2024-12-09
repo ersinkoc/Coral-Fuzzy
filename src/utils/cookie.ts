@@ -15,12 +15,13 @@ export class CookieHandler {
   private cookieJar: Map<string, Cookie> = new Map();
 
   constructor(config: CookieConfig = {}) {
+    const defaultDomain = typeof window !== 'undefined' ? window.location?.hostname : '';
     this.config = {
       enabled: config.enabled ?? true,
       jar: config.jar ?? true,
       secure: config.secure ?? true,
       sameSite: config.sameSite ?? 'Lax',
-      domain: config.domain ?? window.location.hostname,
+      domain: config.domain ?? defaultDomain,
       path: config.path ?? '/'
     };
   }
@@ -114,15 +115,15 @@ export class CookieHandler {
       return false;
     }
 
-    if (cookie.secure && window.location.protocol !== 'https:') {
+    if (cookie.secure && typeof window !== 'undefined' && window.location.protocol !== 'https:') {
       return false;
     }
 
-    if (cookie.domain && !window.location.hostname.endsWith(cookie.domain)) {
+    if (cookie.domain && typeof window !== 'undefined' && !window.location.hostname.endsWith(cookie.domain)) {
       return false;
     }
 
-    if (cookie.path && !window.location.pathname.startsWith(cookie.path)) {
+    if (cookie.path && typeof window !== 'undefined' && !window.location.pathname.startsWith(cookie.path)) {
       return false;
     }
 
@@ -153,4 +154,4 @@ export class CookieHandler {
   clearCookies(): void {
     this.cookieJar.clear();
   }
-} 
+}

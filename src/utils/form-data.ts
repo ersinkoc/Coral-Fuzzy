@@ -6,6 +6,9 @@ export class FormDataHandler {
   private supportedFeatures: {
     streams: boolean;
     chunks: boolean;
+  } = {
+    streams: typeof ReadableStream !== 'undefined' && typeof window !== 'undefined',
+    chunks: typeof Blob !== 'undefined' && 'slice' in Blob.prototype
   };
 
   constructor(config: FormDataConfig = {}) {
@@ -13,12 +16,12 @@ export class FormDataHandler {
       maxFileSize: config.maxFileSize ?? 50 * 1024 * 1024,
       maxFiles: config.maxFiles ?? 10,
       allowedTypes: config.allowedTypes ?? ['*/*'],
-      onProgress: config.onProgress ?? (() => {})
+      onProgress: config.onProgress ?? ((event: ProgressEvent) => {})
     };
 
     this.supportedFeatures = {
-      streams: typeof ReadableStream !== 'undefined',
-      chunks: typeof Blob.prototype.slice !== 'undefined'
+      streams: typeof ReadableStream !== 'undefined' && typeof window !== 'undefined',
+      chunks: typeof Blob !== 'undefined' && 'slice' in Blob.prototype
     };
   }
 

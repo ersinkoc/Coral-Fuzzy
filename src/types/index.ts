@@ -69,13 +69,16 @@ export interface Response<T = any> {
 }
 
 export interface CacheConfig {
+  enabled?: boolean;
   maxAge?: number;
-  exclude?: {
-    query?: boolean;
-    paths?: string[];
-    methods?: Method[];
-  };
   storage?: 'memory' | 'localStorage' | 'sessionStorage';
+  exclude?: {
+    methods?: Method[];
+    paths?: string[];
+    query?: boolean;
+  };
+  maxSize?: number;
+  validateCache?: (response: Response) => boolean;
 }
 
 export interface RetryConfig {

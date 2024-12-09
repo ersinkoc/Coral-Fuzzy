@@ -12,11 +12,6 @@ Coral Fuzzy provides comprehensive metrics and monitoring capabilities to help y
 - [Integration with Monitoring Systems](#integration-with-monitoring-systems)
 - [TypeScript Support](#typescript-support)
 
-## Related Documentation
-- [Performance Optimization](performance.md)
-- [Error Handling](error-handling.md)
-- [Advanced Features](advanced-features.md)
-
 ## Configuration
 
 ```typescript
@@ -31,67 +26,84 @@ const client = new CoralFuzzy({
 
 ## Available Metrics
 
-### Request Metrics
+### Network Metrics
+- URL
+- Method
 - Start time
 - End time
 - Duration
-- Method
-- URL
 - Status code
 - Response size
-- Cache status
-- Success/Error status
+- Time to first byte
+- Download time
 - Error details (if any)
 
 ### Performance Metrics
-- Average response time
+- Latency (min, max, avg)
+- Time to first byte (min, max, avg)
+- Download time (min, max, avg)
 - Success rate
 - Error rate
 - Total requests
 - Active requests
-- Status code distribution
-- Cache statistics
-  - Hit rate
-  - Miss rate
-  - Hit/Miss ratio
-- Compression statistics
-  - Compressed requests
-  - Uncompressed requests
-  - Average compression ratio
-- Timeout rate
-- Retry statistics
-  - Total retries
-  - Average retries per request
+
+### Cache Metrics
+- Hits
+- Misses
+- Hit rate
+- Total requests
+- Cache size
+- Number of entries
+
+### Compression Metrics
+- Original size
+- Compressed size
+- Compression ratio
+- Number of compressed requests
+
+### Error Metrics
+- Total errors
+- Error types distribution
+- Error rate by type
 
 ## Usage Examples
 
 ### Getting Overall Statistics
 ```typescript
-const stats = client.getStats();
-console.log('Performance metrics:', stats.performance);
-console.log('Recent requests:', stats.requests);
+const stats = client.metrics.getStats();
+console.log('Network performance:', stats.network);
+console.log('Cache performance:', stats.cache);
+console.log('Compression stats:', stats.compression);
+console.log('Error stats:', stats.errors);
 ```
 
-### Monitoring Cache Performance
+### Monitoring Network Performance
 ```typescript
-const stats = client.getStats();
-const cacheStats = stats.performance.cachingStats;
-console.log(`Cache hit rate: ${cacheStats.ratio}`);
+const stats = client.metrics.getStats();
+const networkStats = stats.network;
+
+console.log(`Average latency: ${networkStats.latency.avg}ms`);
+console.log(`Time to first byte: ${networkStats.timeToFirstByte.avg}ms`);
+console.log(`Download time: ${networkStats.downloadTime.avg}ms`);
+```
+
+### Tracking Cache Performance
+```typescript
+const stats = client.metrics.getStats();
+const cacheStats = stats.cache;
+
+console.log(`Cache hit rate: ${cacheStats.hitRate * 100}%`);
 console.log(`Cache hits: ${cacheStats.hits}`);
 console.log(`Cache misses: ${cacheStats.misses}`);
 ```
 
-### Tracking Response Times
+### Monitoring Compression
 ```typescript
-const stats = client.getStats();
-console.log(`Average response time: ${stats.performance.averageResponseTime}ms`);
-```
+const stats = client.metrics.getStats();
+const compressionStats = stats.compression;
 
-### Error Monitoring
-```typescript
-const stats = client.getStats();
-console.log(`Error rate: ${stats.performance.errorRate * 100}%`);
-console.log(`Success rate: ${stats.performance.successRate * 100}%`);
+console.log(`Compression ratio: ${compressionStats.compressionRatio * 100}%`);
+console.log(`Total size saved: ${compressionStats.totalOriginalSize - compressionStats.totalCompressedSize} bytes`);
 ```
 
 ## Best Practices
@@ -119,7 +131,7 @@ console.log(`Success rate: ${stats.performance.successRate * 100}%`);
 client.use({
   name: 'metrics-export',
   post: async (response) => {
-    const stats = client.getStats();
+    const stats = client.metrics.getStats();
     await sendToMonitoringSystem(stats);
     return response;
   }
@@ -131,10 +143,10 @@ client.use({
 client.use({
   name: 'error-tracking',
   error: async (error) => {
-    const stats = client.getStats();
+    const stats = client.metrics.getStats();
     await errorTrackingSystem.report({
       error,
-      metrics: stats.performance
+      metrics: stats
     });
     throw error;
   }
@@ -144,12 +156,36 @@ client.use({
 ## TypeScript Support
 
 ```typescript
-import { RequestMetrics, PerformanceMetrics } from 'coral-fuzzy';
-
-interface MetricsResponse {
-  requests: RequestMetrics[];
-  performance: PerformanceMetrics;
+interface MetricsConfig {
+  enabled?: boolean;
+  sampleRate?: number;
+  historySize?: number;
 }
 
-const stats: MetricsResponse = client.getStats();
+interface NetworkMetrics {
+  url: string;
+  method: string;
+  startTime: number;
+  endTime: number;
+  duration: number;
+  status: number;
+  size: number;
+  timeToFirstByte?: number;
+  downloadTime?: number;
+  error?: Error;
+}
+
+interface PerformanceMetrics {
+  min: number;
+  max: number;
+  avg: number;
+  count: number;
+  total: number;
+}
+
+interface NetworkStats {
+  latency: PerformanceMetrics;
+  timeToFirstByte: PerformanceMetrics;
+  downloadTime: PerformanceMetrics;
+}
 ``` 

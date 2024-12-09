@@ -1,30 +1,34 @@
-import { CompressionConfig, RequestConfig } from '../types';
-import type { Response } from '../types';
+import { CompressionConfig, RequestConfig, Response } from '../types';
 
 export class CompressionHandler {
   private config: Required<CompressionConfig>;
+  private compressionSupported: boolean;
 
   constructor(config: CompressionConfig = {}) {
     this.config = {
+      enabled: config.enabled ?? true,
       threshold: config.threshold ?? 1024, // 1KB
-      algorithm: config.algorithm ?? 'gzip',
-      enabled: config.enabled ?? true
+      algorithm: config.algorithm ?? 'gzip'
     };
+
+    this.compressionSupported = typeof CompressionStream !== 'undefined';
   }
 
-  async compressRequest(config: RequestConfig): Promise<RequestConfig> {
+  async processRequest(config: RequestConfig): Promise<RequestConfig> {
     if (!this.shouldCompress(config)) {
       return config;
     }
 
     const data = config.data;
-    if (!data) return config;
+    if (!data || typeof data !== 'string') {
+      return config;
+    }
 
     try {
-      const compressed = await this.compress(data);
+      const compressedData = await this.compress(data);
       return {
         ...config,
-        data: compressed,
+        data: compressedData,
         headers: {
           ...config.headers,
           'Content-Encoding': this.config.algorithm
@@ -36,18 +40,20 @@ export class CompressionHandler {
     }
   }
 
-  async decompressResponse<T>(response: Response<T>): Promise<Response<T>> {
+  async processResponse(response: Response): Promise<Response> {
     const contentEncoding = response.headers['content-encoding']?.toLowerCase();
-    if (!contentEncoding) return response;
+    if (!contentEncoding || !this.isCompressed(contentEncoding)) {
+      return response;
+    }
 
     try {
-      const decompressed = await this.decompress(response.data, contentEncoding);
+      const decompressedData = await this.decompress(response.data, contentEncoding);
       return {
         ...response,
-        data: decompressed,
+        data: decompressedData,
         headers: {
           ...response.headers,
-          'content-length': String(this.getDataSize(decompressed))
+          'content-length': String(decompressedData.length)
         }
       };
     } catch (error) {
@@ -57,81 +63,95 @@ export class CompressionHandler {
   }
 
   private shouldCompress(config: RequestConfig): boolean {
-    if (!this.config.enabled) return false;
-    if (config.compression === false) return false;
+    if (!this.config.enabled || !this.compressionSupported) {
+      return false;
+    }
 
     const data = config.data;
-    if (!data) return false;
+    if (!data || typeof data !== 'string') {
+      return false;
+    }
 
-    const size = this.getDataSize(data);
-    return size >= this.config.threshold;
+    return data.length >= this.config.threshold;
   }
 
-  private async compress(data: any): Promise<ArrayBuffer> {
-    if (typeof CompressionStream === 'undefined') {
-      throw new Error('CompressionStream not supported');
-    }
-
-    const textEncoder = new TextEncoder();
-    const buffer = typeof data === 'string' ? 
-      textEncoder.encode(data) : 
-      textEncoder.encode(JSON.stringify(data));
-
-    const stream = new Blob([buffer]).stream();
-    const compressedStream = stream.pipeThrough(
-      new CompressionStream(this.config.algorithm as 'gzip' | 'deflate')
-    );
-
-    return new Response(compressedStream).arrayBuffer();
+  private isCompressed(contentEncoding: string): boolean {
+    return ['gzip', 'deflate'].includes(contentEncoding);
   }
 
-  private async decompress(data: any, algorithm: string): Promise<any> {
-    if (typeof DecompressionStream === 'undefined') {
-      throw new Error('DecompressionStream not supported');
+  private async compress(data: string): Promise<Uint8Array> {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(data));
+        controller.close();
+      }
+    });
+
+    const cs = new CompressionStream(this.config.algorithm);
+    const compressedStream = stream.pipeThrough(cs);
+    const chunks: Uint8Array[] = [];
+
+    const reader = compressedStream.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
     }
 
-    const buffer = data instanceof ArrayBuffer ? 
-      data : 
-      await new Response(data).arrayBuffer();
-
-    const stream = new Blob([buffer]).stream();
-    const decompressedStream = stream.pipeThrough(
-      new DecompressionStream(algorithm as 'gzip' | 'deflate')
-    );
-
-    const response = await new Response(decompressedStream).arrayBuffer();
-    const textDecoder = new TextDecoder();
-    const text = textDecoder.decode(response);
-
-    try {
-      return JSON.parse(text);
-    } catch {
-      return text;
+    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.length;
     }
+
+    return result;
   }
 
-  private getDataSize(data: any): number {
-    if (data instanceof ArrayBuffer) {
-      return data.byteLength;
+  private async decompress(data: Uint8Array, algorithm: string): Promise<string> {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(data);
+        controller.close();
+      }
+    });
+
+    const ds = new DecompressionStream(algorithm as 'gzip' | 'deflate');
+    const decompressedStream = stream.pipeThrough(ds);
+    const chunks: Uint8Array[] = [];
+
+    const reader = decompressedStream.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
     }
-    if (data instanceof Blob) {
-      return data.size;
+
+    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.length;
     }
-    if (typeof data === 'string') {
-      return new TextEncoder().encode(data).length;
-    }
-    return new TextEncoder().encode(JSON.stringify(data)).length;
+
+    const decoder = new TextDecoder();
+    return decoder.decode(result);
   }
 
   getStats(): {
     enabled: boolean;
     algorithm: string;
     threshold: number;
+    compressionSupported: boolean;
   } {
     return {
       enabled: this.config.enabled,
       algorithm: this.config.algorithm,
-      threshold: this.config.threshold
+      threshold: this.config.threshold,
+      compressionSupported: this.compressionSupported
     };
   }
 } 

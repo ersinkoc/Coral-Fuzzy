@@ -62,12 +62,18 @@ const client = new CoralFuzzy({
 ```typescript
 const client = new CoralFuzzy({
   cache: {
+    enabled: true,
     storage: 'memory',
-    maxAge: 5 * 60 * 1000,
+    maxAge: 5 * 60 * 1000, // 5 minutes
+    maxSize: 100, // Maximum entries
     exclude: {
-      query: true,
+      methods: ['POST', 'PUT', 'DELETE', 'PATCH'],
       paths: ['/auth'],
-      methods: ['POST', 'PUT', 'DELETE']
+      query: false
+    },
+    validateCache: (response) => {
+      const cacheControl = response.headers['cache-control'];
+      return !cacheControl?.includes('no-store');
     }
   }
 });
@@ -117,6 +123,25 @@ const client = new CoralFuzzy({
     }
   }
 });
+```
+
+### Metrics Configuration
+
+```typescript
+const client = new CoralFuzzy({
+  metrics: {
+    enabled: true,
+    sampleRate: 1.0,    // Sample 100% of requests
+    historySize: 1000,  // Keep last 1000 requests in memory
+  }
+});
+
+// Get metrics
+const stats = client.metrics.getStats();
+console.log('Network stats:', stats.network);
+console.log('Cache stats:', stats.cache);
+console.log('Compression stats:', stats.compression);
+console.log('Error stats:', stats.errors);
 ```
 
 ## Environment-based Configuration

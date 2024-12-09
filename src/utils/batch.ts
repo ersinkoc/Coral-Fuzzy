@@ -3,41 +3,46 @@ import { BatchConfig, RequestConfig, Response } from '../types/index';
 interface BatchItem<T> {
   config: RequestConfig;
   resolve: (response: Response<T>) => void;
-  reject: (error: any) => void;
+  reject: (error: unknown) => void;
 }
 
 export class BatchHandler {
-  private batch: BatchItem<any>[] = [];
+  private batch: BatchItem<unknown>[] = [];
   private batchTimeout: NodeJS.Timeout | null = null;
-  private config: Required<BatchConfig>;
+  private readonly maxBatchSize: number;
+  private readonly batchDelay: number;
 
   constructor(config: BatchConfig = {}) {
-    this.config = {
-      maxBatchSize: config.maxBatchSize ?? 5,
-      batchDelay: config.batchDelay ?? 50
-    };
+    this.maxBatchSize = config.maxBatchSize ?? 5;
+    this.batchDelay = config.batchDelay ?? 50;
   }
 
   async execute<T>(
     request: (config: RequestConfig) => Promise<Response<T>>,
     config: RequestConfig
   ): Promise<Response<T>> {
-    // Eğer batch özelliği kapalıysa veya POST/PUT/DELETE ise direkt çalıştır
-    if (config.batch === false || ['POST', 'PUT', 'DELETE'].includes(config.method || 'GET')) {
+    const method = (config.method ?? 'GET').toUpperCase();
+
+    if (config.batch === false || ['POST', 'PUT', 'DELETE', 'PATCH'].includes(method)) {
       return request(config);
     }
 
-    return new Promise((resolve, reject) => {
-      this.batch.push({ config, resolve, reject });
-
-      if (this.batch.length >= this.config.maxBatchSize) {
-        this.processBatch(request);
-      } else if (!this.batchTimeout) {
-        this.batchTimeout = setTimeout(() => {
-          this.processBatch(request);
-        }, this.config.batchDelay);
-      }
+    return new Promise<Response<T>>((resolve, reject) => {
+      this.batch.push({ config, resolve, reject } as BatchItem<unknown>);
+      this.scheduleBatchProcessing(request);
     });
+  }
+
+  private scheduleBatchProcessing<T>(
+    request: (config: RequestConfig) => Promise<Response<T>>
+  ): void {
+    if (this.batch.length >= this.maxBatchSize) {
+      void this.processBatch(request);
+    } else if (!this.batchTimeout) {
+      this.batchTimeout = setTimeout(() => {
+        void this.processBatch(request);
+      }, this.batchDelay);
+    }
   }
 
   private async processBatch<T>(
@@ -52,17 +57,13 @@ export class BatchHandler {
     this.batch = [];
 
     try {
-      // Batch içindeki istekleri grupla
       const batchGroups = this.groupBatchRequests(currentBatch);
-
-      // Her grup için paralel istek gönder
       await Promise.all(
-        Object.entries(batchGroups).map(async ([key, items]) => {
+        Object.entries(batchGroups).map(async ([, items]) => {
           try {
             const batchConfig = this.createBatchConfig(items);
             const response = await request(batchConfig);
             
-            // Başarılı yanıtı ilgili isteklere dağıt
             items.forEach(item => {
               item.resolve({
                 ...response,
@@ -71,18 +72,18 @@ export class BatchHandler {
               });
             });
           } catch (error) {
-            // Hata durumunda tüm batch'i reddet
             items.forEach(item => item.reject(error));
           }
         })
       );
     } catch (error) {
-      // Genel hata durumunda tüm batch'i reddet
       currentBatch.forEach(item => item.reject(error));
     }
   }
 
-  private groupBatchRequests(batch: BatchItem<any>[]): Record<string, BatchItem<any>[]> {
+  private groupBatchRequests(
+    batch: BatchItem<unknown>[]
+  ): Record<string, BatchItem<unknown>[]> {
     return batch.reduce((groups, item) => {
       const key = this.getBatchKey(item.config);
       if (!groups[key]) {
@@ -90,15 +91,17 @@ export class BatchHandler {
       }
       groups[key].push(item);
       return groups;
-    }, {} as Record<string, BatchItem<any>[]>);
+    }, {} as Record<string, BatchItem<unknown>[]>);
   }
 
   private getBatchKey(config: RequestConfig): string {
-    const { baseURL, url, method = 'GET' } = config;
-    return `${baseURL || ''}|${url || ''}|${method}`;
+    const baseURL = config.baseURL ?? '';
+    const url = config.url ?? '';
+    const method = config.method ?? 'GET';
+    return `${baseURL}|${url}|${method}`.toUpperCase();
   }
 
-  private createBatchConfig(items: BatchItem<any>[]): RequestConfig {
+  private createBatchConfig(items: BatchItem<unknown>[]): RequestConfig {
     const baseConfig = items[0].config;
     return {
       ...baseConfig,
@@ -110,23 +113,23 @@ export class BatchHandler {
     };
   }
 
-  private extractResponseData(data: any, config: RequestConfig): any {
-    // URL'den veri ID'sini çıkar
-    const urlParts = (config.url || '').split('/');
+  private extractResponseData(data: unknown, config: RequestConfig): unknown {
+    if (!Array.isArray(data)) return data;
+    
+    const urlParts = (config.url ?? '').split('/');
     const id = urlParts[urlParts.length - 1];
+    if (!id) return data;
     
-    // Eğer batch response bir array ise ve ID varsa
-    if (Array.isArray(data) && id) {
-      return data.find(item => item.id === id) || data;
-    }
-    
-    return data;
+    const item = data.find(item => 
+      typeof item === 'object' && 
+      item !== null && 
+      'id' in item && 
+      item.id === id
+    );
+    return item ?? data;
   }
 
-  getStats(): {
-    currentBatchSize: number;
-    isProcessing: boolean;
-  } {
+  getStats(): { currentBatchSize: number; isProcessing: boolean } {
     return {
       currentBatchSize: this.batch.length,
       isProcessing: this.batchTimeout !== null
@@ -144,4 +147,4 @@ export class BatchHandler {
     });
     this.batch = [];
   }
-} 
+}

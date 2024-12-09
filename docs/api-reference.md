@@ -99,13 +99,16 @@ class ValidationError extends CoralError {}
 
 ```typescript
 interface CacheConfig {
+  enabled?: boolean;
   storage?: 'memory' | 'localStorage' | 'sessionStorage';
   maxAge?: number;
+  maxSize?: number;
   exclude?: {
-    query?: boolean;
-    paths?: string[];
     methods?: Method[];
+    paths?: string[];
+    query?: boolean;
   };
+  validateCache?: (response: Response) => boolean;
 }
 ```
 

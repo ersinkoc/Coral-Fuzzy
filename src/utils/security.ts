@@ -1,74 +1,147 @@
-import { RequestConfig, SecurityConfig } from '../types';
+import { SecurityConfig, RequestConfig, Response } from '../types';
 
 export class SecurityHandler {
-  private config: SecurityConfig;
+  private config: Required<SecurityConfig>;
+  private xsrfToken: string | null = null;
 
   constructor(config: SecurityConfig = {}) {
-    this.config = config;
-  }
-
-  async validateRequest(config: RequestConfig): Promise<RequestConfig> {
-    return this.processRequest(config);
+    this.config = {
+      xsrf: {
+        enabled: config.xsrf?.enabled ?? true,
+        cookieName: config.xsrf?.cookieName ?? 'XSRF-TOKEN',
+        headerName: config.xsrf?.headerName ?? 'X-XSRF-TOKEN'
+      },
+      ssl: {
+        verify: config.ssl?.verify ?? true,
+        cert: config.ssl?.cert ?? '',
+        key: config.ssl?.key ?? ''
+      },
+      headers: {
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'SAMEORIGIN',
+        'X-XSS-Protection': '1; mode=block',
+        'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+        ...config.headers
+      },
+      validateOrigin: config.validateOrigin ?? true
+    };
   }
 
   async processRequest(config: RequestConfig): Promise<RequestConfig> {
-    // Security checks
-    if (this.config.validateOrigin) {
-      this.validateOrigin(config);
+    if (!config.headers) {
+      config.headers = {};
     }
-    
-    if (this.config.validateContentType) {
-      this.validateContentType(config);
+
+    // XSRF Token işleme
+    if (this.config.xsrf.enabled && this.shouldAddXsrfToken(config)) {
+      const token = await this.getXsrfToken();
+      if (token) {
+        config.headers[this.config.xsrf.headerName] = token;
+      }
+    }
+
+    // Güvenlik başlıklarını ekle
+    config.headers = {
+      ...this.config.headers,
+      ...config.headers
+    };
+
+    // SSL doğrulama
+    if (this.config.ssl.verify && config.url?.startsWith('https://')) {
+      if (this.config.ssl.cert) {
+        config.cert = this.config.ssl.cert;
+      }
+      if (this.config.ssl.key) {
+        config.key = this.config.ssl.key;
+      }
+    }
+
+    // Origin doğrulama
+    if (this.config.validateOrigin && typeof window !== 'undefined') {
+      config.headers['Origin'] = window.location.origin;
     }
 
     return config;
   }
 
-  validateResponse(response: Response): void {
-    // Response security checks
-    if (this.config.validateResponseHeaders) {
-      this.validateResponseHeaders(response);
-    }
-
-    if (this.config.validateResponseContent) {
-      this.validateResponseContent(response);
-    }
-  }
-
-  private validateOrigin(config: RequestConfig): void {
-    // Origin security check
-    if (config.url) {
-      const urlObj = new URL(config.url);
-      if (urlObj.origin !== window.location.origin) {
-        throw new Error('Invalid origin');
+  processResponse(response: Response): Response {
+    // XSRF token'ı güncelle
+    if (this.config.xsrf.enabled) {
+      const token = response.headers[this.config.xsrf.cookieName.toLowerCase()];
+      if (token) {
+        this.xsrfToken = token;
       }
     }
+
+    return response;
   }
 
-  private validateContentType(config: RequestConfig): void {
-    // Content-Type security check
-    if (config.headers) {
-      const contentType = config.headers['Content-Type'];
-      if (contentType && !contentType.includes('application/json')) {
-        throw new Error('Invalid Content-Type');
+  private shouldAddXsrfToken(config: RequestConfig): boolean {
+    const method = (config.method || 'get').toLowerCase();
+    return ['post', 'put', 'patch', 'delete'].includes(method);
+  }
+
+  private async getXsrfToken(): Promise<string | null> {
+    if (this.xsrfToken) {
+      return this.xsrfToken;
+    }
+
+    if (typeof document !== 'undefined') {
+      const cookies = document.cookie.split(';');
+      for (const cookie of cookies) {
+        const [name, value] = cookie.trim().split('=');
+        if (name === this.config.xsrf.cookieName) {
+          this.xsrfToken = value;
+          return value;
+        }
       }
     }
+
+    return null;
   }
 
-  private validateResponseHeaders(response: Response): void {
-    // Response headers security check
-    if (response.headers) {
-      const contentType = response.headers.get('Content-Type');
-      if (contentType && !contentType.includes('application/json')) {
-        throw new Error('Invalid Content-Type');
+  validateUrl(url: string): boolean {
+    try {
+      const parsedUrl = new URL(url);
+      
+      // HTTP/HTTPS protokol kontrolü
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+        return false;
       }
+
+      // SSL zorunluluğu kontrolü
+      if (this.config.ssl.verify && parsedUrl.protocol !== 'https:') {
+        return false;
+      }
+
+      // Origin doğrulama
+      if (this.config.validateOrigin && typeof window !== 'undefined') {
+        const isSameOrigin = parsedUrl.origin === window.location.origin;
+        if (!isSameOrigin) {
+          // CORS başlıklarını kontrol et
+          if (!this.validateCorsHeaders(url)) {
+            return false;
+          }
+        }
+      }
+
+      return true;
+    } catch {
+      return false;
     }
   }
 
-  private validateResponseContent(response: Response): void {
-    // Response content security check
-    if (response.status === 401) {
-      throw new Error('Unauthorized access');
-    }
+  private validateCorsHeaders(url: string): boolean {
+    // CORS başlıkları kontrolü burada yapılabilir
+    // Bu örnek implementasyonda basit bir kontrol yapıyoruz
+    return true;
+  }
+
+  getSecurityHeaders(): Record<string, string> {
+    return { ...this.config.headers };
+  }
+
+  clear(): void {
+    this.xsrfToken = null;
   }
 } 

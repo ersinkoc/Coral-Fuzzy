@@ -1,10 +1,11 @@
 import { RequestConfig, Response } from '../types';
 
+// Types
 export interface GraphQLConfig {
   url: string;
   headers?: Record<string, string>;
   defaultQuery?: string;
-  defaultVariables?: Record<string, any>;
+  defaultVariables?: Record<string, unknown>;
   batchInterval?: number;
   maxBatchSize?: number;
   validateSchema?: boolean;
@@ -14,44 +15,58 @@ export interface GraphQLConfig {
 
 export interface GraphQLRequest {
   query: string;
-  variables?: Record<string, any>;
+  variables?: Record<string, unknown>;
   operationName?: string;
 }
 
-export interface GraphQLResponse<T = any> {
+export interface GraphQLError {
+  message: string;
+  locations?: Array<{ line: number; column: number }>;
+  path?: string[];
+  extensions?: Record<string, unknown>;
+}
+
+export interface GraphQLResponse<T = unknown> {
   data?: T;
-  errors?: Array<{
-    message: string;
-    locations?: Array<{ line: number; column: number }>;
-    path?: string[];
-    extensions?: Record<string, any>;
-  }>;
+  errors?: GraphQLError[];
 }
 
 export interface GraphQLBatchRequest {
   requests: GraphQLRequest[];
-  resolve: (responses: GraphQLResponse[]) => void;
-  reject: (error: any) => void;
+  resolve: (response: GraphQLResponse) => void;
+  reject: (error: Error) => void;
 }
 
-export interface GraphQLSchema {
+// Schema Types
+interface GraphQLSchema {
   types: GraphQLType[];
   queryType: GraphQLType;
   mutationType?: GraphQLType;
   subscriptionType?: GraphQLType;
 }
 
-export interface GraphQLType {
+type GraphQLTypeKind = 
+  | 'SCALAR' 
+  | 'OBJECT' 
+  | 'INTERFACE' 
+  | 'UNION' 
+  | 'ENUM' 
+  | 'INPUT_OBJECT' 
+  | 'LIST' 
+  | 'NON_NULL';
+
+interface GraphQLType {
   name: string;
-  kind: 'OBJECT' | 'INTERFACE' | 'UNION' | 'ENUM' | 'INPUT_OBJECT' | 'SCALAR';
+  kind: GraphQLTypeKind;
   fields?: GraphQLField[];
   interfaces?: GraphQLType[];
   possibleTypes?: GraphQLType[];
   enumValues?: GraphQLEnumValue[];
   inputFields?: GraphQLInputField[];
+  ofType?: GraphQLType; // For LIST and NON_NULL types
 }
 
-export interface GraphQLField {
+interface GraphQLField {
   name: string;
   type: GraphQLType;
   args?: GraphQLInputField[];
@@ -59,25 +74,16 @@ export interface GraphQLField {
   deprecationReason?: string;
 }
 
-export interface GraphQLEnumValue {
+interface GraphQLEnumValue {
   name: string;
   isDeprecated?: boolean;
   deprecationReason?: string;
 }
 
-export interface GraphQLInputField {
+interface GraphQLInputField {
   name: string;
   type: GraphQLType;
-  defaultValue?: any;
-}
-
-interface IntrospectionResponse {
-  __schema: {
-    types: any[];
-    queryType: { name: string };
-    mutationType?: { name: string };
-    subscriptionType?: { name: string };
-  };
+  defaultValue?: unknown;
 }
 
 interface QueryNode {
@@ -85,18 +91,88 @@ interface QueryNode {
   name?: string;
   type?: string;
   fields?: QueryNode[];
-  arguments?: Array<{ name: string; value: any }>;
+  arguments?: Array<{ name: string; value: unknown }>;
   fragmentRefs?: string[];
 }
 
+const introspectionQuery = `
+  query IntrospectionQuery {
+    __schema {
+      types {
+        kind
+        name
+        fields {
+          name
+          args {
+            name
+            type {
+              kind
+              name
+              ofType {
+                kind
+                name
+              }
+            }
+          }
+          type {
+            kind
+            name
+            ofType {
+              kind
+              name
+            }
+          }
+        }
+        inputFields {
+          name
+          type {
+            kind
+            name
+            ofType {
+              kind
+              name
+            }
+          }
+        }
+        interfaces {
+          kind
+          name
+        }
+        enumValues {
+          name
+          isDeprecated
+          deprecationReason
+        }
+        possibleTypes {
+          kind
+          name
+        }
+      }
+      queryType {
+        name
+      }
+      mutationType {
+        name
+      }
+      subscriptionType {
+        name
+      }
+    }
+  }
+`;
+
 export class GraphQLHandler {
-  private config: Required<GraphQLConfig>;
+  private readonly config: Required<GraphQLConfig>;
   private batchQueue: GraphQLBatchRequest[] = [];
   private batchTimeout: NodeJS.Timeout | null = null;
   private schema: GraphQLSchema | null = null;
   private queryCache: Map<string, QueryNode> = new Map();
 
   constructor(config: GraphQLConfig) {
+    if (!config.url) {
+      throw new Error('GraphQL URL is required');
+    }
+
     this.config = {
       url: config.url,
       headers: config.headers ?? {},
@@ -110,570 +186,196 @@ export class GraphQLHandler {
     };
 
     if (this.config.introspection) {
-      this.fetchSchema();
+      void this.fetchSchema();
     }
   }
 
   private async fetchSchema(): Promise<void> {
-    const introspectionQuery = `
-      query IntrospectionQuery {
-        __schema {
-          types {
-            name
-            kind
-            fields {
-              name
-              type {
-                name
-                kind
-                ofType {
-                  name
-                  kind
-                }
-              }
-              args {
-                name
-                type {
-                  name
-                  kind
-                  ofType {
-                    name
-                    kind
-                  }
-                }
-              }
-            }
-            interfaces {
-              name
-            }
-            possibleTypes {
-              name
-            }
-            enumValues {
-              name
-              isDeprecated
-              deprecationReason
-            }
-            inputFields {
-              name
-              type {
-                name
-                kind
-                ofType {
-                  name
-                  kind
-                }
-              }
-              defaultValue
-            }
-          }
-          queryType {
-            name
-          }
-          mutationType {
-            name
-          }
-          subscriptionType {
-            name
-          }
-        }
-      }
-    `;
-
     try {
-      const response = await this.executeSingle<{ data: IntrospectionResponse }>(
-        (config) => this.request(config),
-        { query: introspectionQuery }
-      );
+      const response = await fetch(this.config.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...this.config.headers
+        },
+        body: JSON.stringify({
+          query: introspectionQuery
+        })
+      });
 
-      if (response.data?.data?.__schema) {
-        this.schema = this.processIntrospectionResponse(response.data.data.__schema);
+      if (!response.ok) {
+        throw new Error(`Schema fetch failed: ${response.statusText}`);
       }
+
+      const result = await response.json() as { data?: { __schema: unknown } };
+      
+      if (!result.data?.__schema) {
+        throw new Error('Invalid schema response');
+      }
+
+      this.schema = this.processIntrospectionResponse(result.data.__schema);
     } catch (error) {
-      console.warn('GraphQL schema not loaded:', error);
+      console.error('Failed to fetch GraphQL schema:', error);
+      this.schema = null;
     }
   }
 
-  private parseQuery(query: string): QueryNode {
-    // Check cache
-    const cached = this.queryCache.get(query);
-    if (cached) {
-      return cached;
+  private processIntrospectionResponse(schemaData: unknown): GraphQLSchema {
+    if (!this.isValidSchemaData(schemaData)) {
+      throw new Error('Invalid schema data');
     }
 
-    // Simple AST parser
-    const lines = query.trim().split('\n');
-    const root: QueryNode = {
-      kind: 'query',
-      fields: []
-    };
+    const types = this.processTypes(schemaData.types);
+    const queryType = this.findType(schemaData.queryType.name, types);
 
-    let currentNode = root;
-    const stack: QueryNode[] = [root];
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      
-      if (trimmed.startsWith('query') || trimmed.startsWith('mutation')) {
-        root.kind = trimmed.startsWith('query') ? 'query' : 'mutation';
-        const nameMatch = trimmed.match(/(?:query|mutation)\s+(\w+)/);
-        if (nameMatch) {
-          root.name = nameMatch[1];
-        }
-      } else if (trimmed.startsWith('{')) {
-        // Field start
-        continue;
-      } else if (trimmed.startsWith('}')) {
-        // Field end
-        stack.pop();
-        currentNode = stack[stack.length - 1];
-      } else if (trimmed) {
-        // Field definition
-        const field: QueryNode = { kind: 'field' };
-        const nameMatch = trimmed.match(/(\w+)(?:\(([^)]+)\))?/);
-        
-        if (nameMatch) {
-          field.name = nameMatch[1];
-          if (nameMatch[2]) {
-            field.arguments = this.parseArguments(nameMatch[2]);
-          }
-        }
-
-        currentNode.fields?.push(field);
-        if (trimmed.includes('{')) {
-          field.fields = [];
-          stack.push(field);
-          currentNode = field;
-        }
-      }
+    if (!queryType) {
+      throw new Error('Query type not found in schema');
     }
 
-    // Cache
-    this.queryCache.set(query, root);
-    return root;
-  }
-
-  private parseArguments(argsStr: string): Array<{ name: string; value: any }> {
-    const args: Array<{ name: string; value: any }> = [];
-    const matches = argsStr.match(/(\w+):\s*([^,\s]+)/g) || [];
-
-    for (const match of matches) {
-      const [name, valueStr] = match.split(':').map(s => s.trim());
-      let value: any = valueStr;
-
-      // Value conversion
-      if (valueStr.startsWith('"') || valueStr.startsWith("'")) {
-        value = valueStr.slice(1, -1);
-      } else if (valueStr === 'true' || valueStr === 'false') {
-        value = valueStr === 'true';
-      } else if (!isNaN(Number(valueStr))) {
-        value = Number(valueStr);
-      } else if (valueStr.startsWith('$')) {
-        value = { variable: valueStr.slice(1) };
-      }
-
-      args.push({ name, value });
-    }
-
-    return args;
-  }
-
-  private validateOperation(query: string, variables?: Record<string, any>): void {
-    if (!this.schema || !this.config.validateSchema) {
-      return;
-    }
-
-    const parsedQuery = this.parseQuery(query);
-    
-    // Check query type
-    if (!parsedQuery.kind) {
-      throw new Error('Invalid query: Operation type not specified');
-    }
-
-    // Type check
-    if (parsedQuery.kind === 'query' && !this.schema.queryType) {
-      throw new Error('This GraphQL API does not support query operations');
-    }
-    if (parsedQuery.kind === 'mutation' && !this.schema.mutationType) {
-      throw new Error('This GraphQL API does not support mutation operations');
-    }
-
-    // Field and argument check
-    this.validateFields(parsedQuery.fields || [], this.getOperationType(parsedQuery.kind));
-
-    // Variable check
-    if (variables) {
-      this.validateVariables(parsedQuery, variables);
-    }
-  }
-
-  private validateFields(fields: QueryNode[], parentType: GraphQLType): void {
-    if (!parentType.fields) {
-      throw new Error(`No field definitions found for type ${parentType.name}`);
-    }
-
-    for (const field of fields) {
-      const schemaField = parentType.fields.find(f => f.name === field.name);
-      
-      if (!schemaField) {
-        throw new Error(`Invalid field: ${field.name} not found on type ${parentType.name}`);
-      }
-
-      // Argument check
-      if (field.arguments?.length) {
-        if (!schemaField.args) {
-          throw new Error(`Field ${field.name} does not accept arguments`);
-        }
-        this.validateArguments(field.arguments, schemaField.args);
-      }
-
-      // Check sub-fields
-      if (field.fields?.length) {
-        const fieldType = this.getFieldType(schemaField.type);
-        this.validateFields(field.fields, fieldType);
-      }
-    }
-  }
-
-  private validateArguments(
-    queryArgs: Array<{ name: string; value: any }>,
-    schemaArgs: GraphQLInputField[]
-  ): void {
-    for (const arg of queryArgs) {
-      const schemaArg = schemaArgs.find(a => a.name === arg.name);
-      
-      if (!schemaArg) {
-        throw new Error(`Invalid argument: ${arg.name}`);
-      }
-
-      // Type check
-      this.validateArgumentValue(arg.value, schemaArg.type);
-    }
-  }
-
-  private validateArgumentValue(value: any, type: GraphQLType): void {
-    if (!type) {
-      throw new Error('Type definition not found');
-    }
-
-    // Basic type check
-    switch (type.kind) {
-      case 'SCALAR':
-        this.validateScalarValue(value, type.name);
-        break;
-      
-      case 'ENUM':
-        this.validateEnumValue(value, type.name);
-        break;
-
-      case 'INPUT_OBJECT':
-        this.validateInputObject(value, type.name);
-        break;
-
-      default:
-        throw new Error(`Unsupported type: ${type.kind}`);
-    }
-  }
-
-  private validateScalarValue(value: any, typeName: string): void {
-    switch (typeName) {
-      case 'Int':
-        if (!Number.isInteger(value)) {
-          throw new Error(`Value must be an integer: ${value}`);
-        }
-        break;
-      case 'Float':
-        if (typeof value !== 'number') {
-          throw new Error(`Value must be a number: ${value}`);
-        }
-        break;
-      case 'String':
-        if (typeof value !== 'string') {
-          throw new Error(`Value must be a string: ${value}`);
-        }
-        break;
-      case 'Boolean':
-        if (typeof value !== 'boolean') {
-          throw new Error(`Value must be a boolean: ${value}`);
-        }
-        break;
-      case 'ID':
-        if (typeof value !== 'string' && typeof value !== 'number') {
-          throw new Error(`Value must be an ID: ${value}`);
-        }
-        break;
-      default:
-        throw new Error(`Unknown scalar type: ${typeName}`);
-    }
-  }
-
-  private validateEnumValue(value: any, typeName: string): void {
-    const enumType = this.schema?.types.find(t => t.name === typeName);
-    if (!enumType?.enumValues?.length) {
-      throw new Error(`No values found for enum type ${typeName}`);
-    }
-
-    if (!enumType.enumValues.some(v => v.name === value)) {
-      throw new Error(`Invalid enum value: ${value}`);
-    }
-  }
-
-  private validateInputObject(value: any, typeName: string): void {
-    if (typeof value !== 'object' || value === null) {
-      throw new Error(`Value must be an object: ${value}`);
-    }
-
-    const inputType = this.schema?.types.find(t => t.name === typeName);
-    if (!inputType?.inputFields?.length) {
-      throw new Error(`No field definitions found for input type ${typeName}`);
-    }
-
-    for (const field of inputType.inputFields) {
-      if (field.name in value) {
-        this.validateArgumentValue(value[field.name], field.type);
-      }
-    }
-  }
-
-  private validateVariables(
-    query: QueryNode,
-    variables: Record<string, any>
-  ): void {
-    // Check variable usage
-    const usedVariables = this.collectVariables(query);
-    
-    // Check for missing variables
-    for (const varName of usedVariables) {
-      if (!(varName in variables)) {
-        throw new Error(`Missing variable: $${varName}`);
-      }
-    }
-
-    // Check for unused variables
-    for (const varName in variables) {
-      if (!usedVariables.has(varName)) {
-        throw new Error(`Unused variable: $${varName}`);
-      }
-    }
-  }
-
-  private collectVariables(node: QueryNode): Set<string> {
-    const variables = new Set<string>();
-
-    // Collect variables from arguments
-    if (node.arguments) {
-      for (const arg of node.arguments) {
-        if (typeof arg.value === 'object' && arg.value?.variable) {
-          variables.add(arg.value.variable);
-        }
-      }
-    }
-
-    // Collect variables from sub-fields
-    if (node.fields) {
-      for (const field of node.fields) {
-        const fieldVars = this.collectVariables(field);
-        fieldVars.forEach(v => variables.add(v));
-      }
-    }
-
-    return variables;
-  }
-
-  private optimizeQuery(query: string): string {
-    if (!this.config.optimizeQueries) {
-      return query;
-    }
-
-    const parsedQuery = this.parseQuery(query);
-    
-    // Remove unnecessary spaces
-    let optimized = query.replace(/\s+/g, ' ').trim();
-
-    // Remove duplicate fields
-    const fields = new Set<string>();
-    optimized = this.deduplicateFields(optimized, fields);
-
-    // Remove unused fragments
-    optimized = this.removeUnusedFragments(optimized, parsedQuery);
-
-    return optimized;
-  }
-
-  private deduplicateFields(query: string, fields: Set<string>): string {
-    const lines = query.split('\n');
-    const result: string[] = [];
-    
-    for (const line of lines) {
-      const fieldMatch = line.match(/\s*(\w+)(?:\([^)]*\))?\s*{?/);
-      if (fieldMatch) {
-        const fieldName = fieldMatch[1];
-        if (!fields.has(fieldName)) {
-          fields.add(fieldName);
-          result.push(line);
-        }
-      } else {
-        result.push(line);
-      }
-    }
-
-    return result.join('\n');
-  }
-
-  private removeUnusedFragments(query: string, parsedQuery: QueryNode): string {
-    const usedFragments = new Set<string>();
-    this.collectFragmentRefs(parsedQuery, usedFragments);
-
-    const lines = query.split('\n');
-    const result: string[] = [];
-    let inFragment = false;
-    let currentFragment = '';
-
-    for (const line of lines) {
-      if (line.trim().startsWith('fragment')) {
-        inFragment = true;
-        const fragmentMatch = line.match(/fragment\s+(\w+)/);
-        if (fragmentMatch) {
-          currentFragment = fragmentMatch[1];
-        }
-      } else if (inFragment && line.trim() === '}') {
-        inFragment = false;
-        if (usedFragments.has(currentFragment)) {
-          result.push(line);
-        }
-      } else if (!inFragment || usedFragments.has(currentFragment)) {
-        result.push(line);
-      }
-    }
-
-    return result.join('\n');
-  }
-
-  private collectFragmentRefs(node: QueryNode, fragments: Set<string>): void {
-    if (node.fragmentRefs) {
-      node.fragmentRefs.forEach(ref => fragments.add(ref));
-    }
-
-    if (node.fields) {
-      node.fields.forEach(field => this.collectFragmentRefs(field, fragments));
-    }
-  }
-
-  private processIntrospectionResponse(schemaData: any): GraphQLSchema {
     return {
-      types: this.processTypes(schemaData.types),
-      queryType: this.findType(schemaData.queryType.name, schemaData.types),
-      mutationType: schemaData.mutationType ? 
-        this.findType(schemaData.mutationType.name, schemaData.types) : 
-        undefined,
-      subscriptionType: schemaData.subscriptionType ?
-        this.findType(schemaData.subscriptionType.name, schemaData.types) :
-        undefined
+      types,
+      queryType,
+      mutationType: schemaData.mutationType 
+        ? this.findType(schemaData.mutationType.name, types) 
+        : undefined,
+      subscriptionType: schemaData.subscriptionType
+        ? this.findType(schemaData.subscriptionType.name, types)
+        : undefined
     };
   }
 
-  private processTypes(types: any[]): GraphQLType[] {
-    return types.map(type => ({
-      name: type.name,
-      kind: type.kind,
-      fields: type.fields?.map(this.processField.bind(this)),
-      interfaces: type.interfaces?.map((iface: any) => ({ name: iface.name })),
-      possibleTypes: type.possibleTypes?.map((pt: any) => ({ name: pt.name })),
-      enumValues: type.enumValues,
-      inputFields: type.inputFields?.map(this.processInputField.bind(this))
-    }));
-  }
-
-  private processField(field: any): GraphQLField {
-    return {
-      name: field.name,
-      type: this.processTypeRef(field.type),
-      args: field.args?.map(this.processInputField.bind(this)),
-      isDeprecated: field.isDeprecated,
-      deprecationReason: field.deprecationReason
-    };
-  }
-
-  private processInputField(field: any): GraphQLInputField {
-    return {
-      name: field.name,
-      type: this.processTypeRef(field.type),
-      defaultValue: field.defaultValue
-    };
-  }
-
-  private processTypeRef(type: any): GraphQLType {
-    return {
-      name: type.name || (type.ofType?.name ?? 'Unknown'),
-      kind: type.kind || (type.ofType?.kind ?? 'SCALAR')
-    };
-  }
-
-  private findType(name: string, types: any[]): GraphQLType {
-    const type = types.find(t => t.name === name);
-    return this.processTypeRef(type);
-  }
-
-  private getOperationType(kind: string): GraphQLType {
-    if (!this.schema || !this.schema.types.length) {
-      throw new Error('Schema not loaded or empty');
-    }
-
-    const defaultType = this.schema.types[0];
+  private isValidSchemaData(data: unknown): data is {
+    types: unknown[];
+    queryType: { name: string };
+    mutationType?: { name: string };
+    subscriptionType?: { name: string };
+  } {
+    if (!data || typeof data !== 'object') return false;
     
-    switch (kind) {
-      case 'query':
-        return this.schema.queryType || defaultType;
-      case 'mutation':
-        return this.schema.mutationType || defaultType;
-      case 'subscription':
-        return this.schema.subscriptionType || defaultType;
-      default:
-        throw new Error('Invalid operation type');
-    }
+    const schemaData = data as Record<string, unknown>;
+    
+    return Array.isArray(schemaData.types) &&
+           typeof schemaData.queryType === 'object' &&
+           schemaData.queryType !== null &&
+           'name' in schemaData.queryType &&
+           typeof schemaData.queryType.name === 'string';
   }
 
-  private getFieldType(type: GraphQLType): GraphQLType {
-    if (!this.schema?.types?.length) {
-      throw new Error('Schema not loaded or empty');
-    }
-
-    const objectTypes = this.schema.types.filter(t => t.kind === 'OBJECT');
-    if (!objectTypes.length) {
-      throw new Error('No OBJECT type found in schema');
-    }
-
-    if (type.kind === 'OBJECT') {
-      return type;
-    } else if (type.kind === 'INTERFACE' || type.kind === 'UNION') {
-      return objectTypes[0];
-    }
-
-    throw new Error(`Unsupported type: ${type.kind}`);
+  private processTypes(types: unknown[]): GraphQLType[] {
+    return types
+      .filter((type): type is Record<string, unknown> => 
+        type !== null && typeof type === 'object')
+      .map(type => this.processType(type));
   }
 
-  private async request<T>(config: RequestConfig): Promise<Response<T>> {
-    // This method should be implemented by CoralFuzzy instance
-    throw new Error('request method should be implemented');
+  private processType(typeData: Record<string, unknown>): GraphQLType {
+    if (!this.isValidTypeData(typeData)) {
+      throw new Error(`Invalid type data: ${JSON.stringify(typeData)}`);
+    }
+
+    return {
+      name: typeData.name,
+      kind: typeData.kind,
+      fields: typeData.fields?.map(field => this.processField(field)),
+      interfaces: typeData.interfaces?.map(iface => this.processType(iface)),
+      possibleTypes: typeData.possibleTypes?.map(type => this.processType(type)),
+      enumValues: typeData.enumValues?.map(value => ({
+        name: value.name,
+        isDeprecated: value.isDeprecated,
+        deprecationReason: value.deprecationReason
+      })),
+      inputFields: typeData.inputFields?.map(field => ({
+        name: field.name,
+        type: this.processType(field.type),
+        defaultValue: field.defaultValue
+      }))
+    };
   }
 
-  async execute<T = any>(
+  private isValidTypeData(data: Record<string, unknown>): data is {
+    name: string;
+    kind: GraphQLTypeKind;
+    fields?: Record<string, unknown>[];
+    interfaces?: Record<string, unknown>[];
+    possibleTypes?: Record<string, unknown>[];
+    enumValues?: Array<{
+      name: string;
+      isDeprecated?: boolean;
+      deprecationReason?: string;
+    }>;
+    inputFields?: Array<{
+      name: string;
+      type: Record<string, unknown>;
+      defaultValue?: unknown;
+    }>;
+  } {
+    return typeof data.name === 'string' &&
+           typeof data.kind === 'string' &&
+           this.isValidTypeKind(data.kind);
+  }
+
+  private isValidTypeKind(kind: string): kind is GraphQLTypeKind {
+    return [
+      'SCALAR', 'OBJECT', 'INTERFACE', 'UNION',
+      'ENUM', 'INPUT_OBJECT', 'LIST', 'NON_NULL'
+    ].includes(kind);
+  }
+
+  private processField(fieldData: Record<string, unknown>): GraphQLField {
+    if (!this.isValidFieldData(fieldData)) {
+      throw new Error(`Invalid field data: ${JSON.stringify(fieldData)}`);
+    }
+
+    return {
+      name: fieldData.name,
+      type: this.processType(fieldData.type),
+      args: fieldData.args?.map(arg => ({
+        name: arg.name,
+        type: this.processType(arg.type),
+        defaultValue: arg.defaultValue
+      })),
+      isDeprecated: fieldData.isDeprecated,
+      deprecationReason: fieldData.deprecationReason
+    };
+  }
+
+  private isValidFieldData(data: Record<string, unknown>): data is {
+    name: string;
+    type: Record<string, unknown>;
+    args?: Array<{
+      name: string;
+      type: Record<string, unknown>;
+      defaultValue?: unknown;
+    }>;
+    isDeprecated?: boolean;
+    deprecationReason?: string;
+  } {
+    return typeof data.name === 'string' &&
+           data.type !== null &&
+           typeof data.type === 'object';
+  }
+
+  private findType(name: string, types: GraphQLType[]): GraphQLType | undefined {
+    return types.find(type => type.name === name);
+  }
+
+  async execute<T>(
     request: (config: RequestConfig) => Promise<Response<GraphQLResponse<T>>>,
     query: string,
-    variables?: Record<string, any>,
+    variables?: Record<string, unknown>,
     operationName?: string
   ): Promise<GraphQLResponse<T>> {
-    this.validateOperation(query, variables);
-
-    const optimizedQuery = this.optimizeQuery(query);
-    
     const graphqlRequest: GraphQLRequest = {
-      query: optimizedQuery || this.config.defaultQuery,
-      variables: { ...this.config.defaultVariables, ...variables },
+      query,
+      variables,
       operationName
     };
 
-    if (this.isMutation(optimizedQuery)) {
+    if (this.config.validateSchema && this.schema) {
+      this.validateOperation(query, variables);
+    }
+
+    if (this.isMutation(query)) {
       return this.executeSingle(request, graphqlRequest);
     }
 
@@ -702,14 +404,14 @@ export class GraphQLHandler {
     }
   }
 
-  private addToBatch<T>(
+  private async addToBatch<T>(
     request: (config: RequestConfig) => Promise<Response<GraphQLResponse<T>>>,
     graphqlRequest: GraphQLRequest
   ): Promise<GraphQLResponse<T>> {
     return new Promise((resolve, reject) => {
       this.batchQueue.push({
         requests: [graphqlRequest],
-        resolve: ([response]) => resolve(response),
+        resolve: resolve as (response: GraphQLResponse) => void,
         reject
       });
 
@@ -718,28 +420,29 @@ export class GraphQLHandler {
   }
 
   private scheduleBatch(
-    request: (config: RequestConfig) => Promise<Response<any>>
+    request: (config: RequestConfig) => Promise<Response<unknown>>
   ): void {
-    if (this.batchTimeout) {
-      return;
+    if (this.batchQueue.length >= this.config.maxBatchSize) {
+      void this.processBatch(request);
+    } else if (!this.batchTimeout) {
+      this.batchTimeout = setTimeout(() => {
+        void this.processBatch(request);
+      }, this.config.batchInterval);
     }
-
-    this.batchTimeout = setTimeout(() => {
-      this.processBatch(request);
-    }, this.config.batchInterval);
   }
 
   private async processBatch(
-    request: (config: RequestConfig) => Promise<Response<any>>
+    request: (config: RequestConfig) => Promise<Response<unknown>>
   ): Promise<void> {
-    this.batchTimeout = null;
-
-    if (this.batchQueue.length === 0) {
-      return;
+    if (this.batchTimeout) {
+      clearTimeout(this.batchTimeout);
+      this.batchTimeout = null;
     }
 
-    const batch = this.batchQueue.splice(0, this.config.maxBatchSize);
-    const requests = batch.map(item => item.requests[0]);
+    const currentBatch = [...this.batchQueue];
+    this.batchQueue = [];
+
+    if (currentBatch.length === 0) return;
 
     try {
       const response = await request({
@@ -749,39 +452,128 @@ export class GraphQLHandler {
           'Content-Type': 'application/json',
           ...this.config.headers
         },
-        data: requests.length === 1 ? requests[0] : requests
+        data: {
+          queries: currentBatch.map(item => item.requests[0])
+        }
       });
 
-      const responses = Array.isArray(response.data) ? 
-        response.data : 
-        [response.data];
+      const data = response.data as unknown;
+      
+      if (!this.isValidBatchResponse(data)) {
+        throw new Error('Invalid batch response');
+      }
 
-      responses.forEach((res, index) => {
-        this.validateResponse(res);
-        batch[index].resolve(res);
+      currentBatch.forEach((item, index) => {
+        const result = data[index];
+        if (result.errors?.length) {
+          item.reject(new Error(result.errors[0].message));
+        } else {
+          item.resolve(result);
+        }
       });
     } catch (error) {
-      batch.forEach(item => item.reject(this.formatError(error)));
+      currentBatch.forEach(item => {
+        item.reject(this.formatError(error));
+      });
     }
+  }
+
+  private isValidBatchResponse(data: unknown): data is GraphQLResponse[] {
+    return Array.isArray(data) && data.every(item => 
+      typeof item === 'object' && item !== null &&
+      (('data' in item) || ('errors' in item && Array.isArray(item.errors)))
+    );
   }
 
   private validateResponse(response: GraphQLResponse): void {
     if (response.errors?.length) {
-      const error = new Error(response.errors[0].message);
-      Object.assign(error, { response });
-      throw error;
+      throw new Error(response.errors[0].message);
     }
   }
 
-  private formatError(error: any): Error {
-    if (error.response?.data?.errors) {
-      return new Error(error.response.data.errors[0].message);
+  private formatError(error: unknown): Error {
+    if (error instanceof Error) {
+      return error;
     }
-    return error;
+    return new Error(String(error));
   }
 
   private isMutation(query: string): boolean {
-    return /^\\s*mutation\\b/i.test(query);
+    return /^\s*mutation\s/.test(query);
+  }
+
+  private validateOperation(query: string, variables?: Record<string, unknown>): void {
+    const parsedQuery = this.parseQuery(query);
+    if (!parsedQuery) {
+      throw new Error('Failed to parse GraphQL query');
+    }
+
+    if (variables) {
+      this.validateVariables(parsedQuery, variables);
+    }
+  }
+
+  private parseQuery(query: string): QueryNode | null {
+    // Basic query parser implementation
+    // In a production environment, consider using a proper GraphQL parser library
+    try {
+      const trimmed = query.trim();
+      const operationType = trimmed.startsWith('mutation') ? 'mutation' : 
+                          trimmed.startsWith('subscription') ? 'subscription' : 
+                          'query';
+
+      return {
+        kind: operationType,
+        fields: this.parseFields(query)
+      };
+    } catch (error) {
+      console.error('Query parsing failed:', error);
+      return null;
+    }
+  }
+
+  private parseFields(query: string): QueryNode[] {
+    // Simplified field parser
+    // This is a basic implementation and should be replaced with a proper parser
+    const fields: QueryNode[] = [];
+    const fieldRegex = /\w+\s*{([^}]*)}/g;
+    let match;
+
+    while ((match = fieldRegex.exec(query)) !== null) {
+      fields.push({
+        kind: 'field',
+        name: match[0].split('{')[0].trim(),
+        fields: this.parseFields(match[1])
+      });
+    }
+
+    return fields;
+  }
+
+  private validateVariables(
+    query: QueryNode,
+    variables: Record<string, unknown>
+  ): void {
+    const usedVariables = new Set<string>();
+    this.collectVariables(query, usedVariables);
+
+    for (const varName of Object.keys(variables)) {
+      if (!usedVariables.has(varName)) {
+        console.warn(`Unused variable in GraphQL query: ${varName}`);
+      }
+    }
+  }
+
+  private collectVariables(node: QueryNode, variables: Set<string>): void {
+    if (node.arguments) {
+      node.arguments.forEach(arg => {
+        if (typeof arg.value === 'string' && arg.value.startsWith('$')) {
+          variables.add(arg.value.slice(1));
+        }
+      });
+    }
+
+    node.fields?.forEach(field => this.collectVariables(field, variables));
   }
 
   getStats(): {
@@ -792,7 +584,7 @@ export class GraphQLHandler {
     return {
       queueSize: this.batchQueue.length,
       isBatching: this.batchTimeout !== null,
-      config: { ...this.config }
+      config: this.config
     };
   }
 
@@ -803,21 +595,4 @@ export class GraphQLHandler {
     }
     this.batchQueue = [];
   }
-
-  getSchema(): GraphQLSchema | null {
-    return this.schema;
-  }
-
-  async refreshSchema(): Promise<void> {
-    await this.fetchSchema();
-  }
-
-  validateQuery(query: string, variables?: Record<string, any>): boolean {
-    try {
-      this.validateOperation(query, variables);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-} 
+}
